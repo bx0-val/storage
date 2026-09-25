@@ -6,6 +6,10 @@ def Laws.ticks_never_scan(s):
   match s:
     case App.State{v, n, a, h}: {==}
 
+def Laws.copying_preserves_selection_and_view(s):
+  match s:
+    case App.State{v, n, a, h}: {==}
+
 def Laws.quit_always_stops(s):
   match s:
     case App.State{v, n, a, h}: {==}
