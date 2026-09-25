@@ -1,10 +1,12 @@
 """Integration checks for storage data, filesystem edge cases, and terminal use."""
 
 import fcntl
+import base64
 import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import struct
@@ -25,12 +27,13 @@ def run(*args, **kwargs):
 
 
 class Terminal:
-    def __init__(self, *args):
+    def __init__(self, *args, env=None):
         self.master, self.slave = pty.openpty()
         self.before = termios.tcgetattr(self.slave)
         self.resize(100, 32)
         environment = {**os.environ, "TERM": "xterm-256color"}
         environment.pop("NO_COLOR", None)
+        environment.update(env or {})
         self.child = subprocess.Popen([str(STORAGE), *map(str, args)],
                                       stdin=self.slave, stdout=self.slave, stderr=self.slave,
                                       env=environment, start_new_session=True)
@@ -73,6 +76,81 @@ class Terminal:
 
 
 class StorageTest(unittest.TestCase):
+    def assert_copied_path(self, terminal, path):
+        terminal.send("c")
+        terminal.wait_for("\a")
+        payloads = re.findall(rb"\x1b\]52;c;([A-Za-z0-9+/=]*)\x07", terminal.output)
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(base64.b64decode(payloads[0], validate=True), os.fsencode(path))
+
+    def test_copy_full_paths_and_preserve_navigation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "child").mkdir()
+            (root / "child/payload").write_bytes(b"x" * 8192)
+            for name in ("a", "ab", "abc", "世界_💾\tline\n\x1b]52;c;evil\a", "long-" + "x" * 180):
+                (root / name).touch()
+            (root / "link").symlink_to("/etc")
+            (root / os.fsdecode(b"raw-\xff")).touch()
+            entries = json.loads(run("--json", root, check=True).stdout)["directory"]["entries"]
+            terminal = Terminal(root, env={"PATH": "/nonexistent", "NO_COLOR": "1"})
+            try:
+                terminal.wait_for("Cached:")
+                self.assertNotIn(b"\x1b]52;", terminal.output)
+                for index, entry in enumerate(entries):
+                    if index:
+                        terminal.send("j")
+                        terminal.wait_for("\x1b[H\x1b[2J")
+                    # JSON sanitizes invalid UTF-8; use the original byte filename.
+                    path = root / os.fsdecode(b"raw-\xff") if entry["name"].startswith("raw-") else entry["path"]
+                    self.assert_copied_path(terminal, path)
+                    self.assert_copied_path(terminal, path)  # repeated copy bypasses repaint caching
+                terminal.send("\x1b[H")
+                terminal.wait_for("child/")
+                self.assert_copied_path(terminal, root / "child")
+                terminal.send("\n")
+                terminal.wait_for("payload")
+                self.assert_copied_path(terminal, root / "child/payload")
+                terminal.send("q")
+                terminal.assert_restored(self)
+            finally:
+                terminal.close()
+
+    def test_copy_empty_folder_keeps_clipboard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            terminal = Terminal(temporary)
+            try:
+                terminal.wait_for("Cached:")
+                terminal.send("c")
+                terminal.wait_for("No selected path to copy")
+                self.assertNotIn(b"\x1b]52;", terminal.output)
+                terminal.send("q")
+                terminal.assert_restored(self)
+            finally:
+                terminal.close()
+
+    def test_copy_filesystem_and_device_paths(self):
+        data = json.loads(run("--json", check=True).stdout)
+        devices = [device for disk in data["devices"] for device in [disk, *disk["children"]]]
+        terminal = Terminal()
+        try:
+            terminal.wait_for("MOUNTED FILESYSTEMS")
+            self.assert_copied_path(terminal, "/")
+            terminal.send("2")
+            terminal.wait_for("DISKS & PARTITIONS")
+            if devices:
+                self.assert_copied_path(terminal, "/dev/" + min(d["name"] for d in devices))
+            else:
+                terminal.send("c")
+                terminal.wait_for("No selected path to copy")
+                self.assertNotIn(b"\x1b]52;", terminal.output)
+            terminal.send("?")
+            terminal.wait_for("Copy selected full path")
+            terminal.send("q")
+            terminal.assert_restored(self)
+        finally:
+            terminal.close()
+
     def test_filesystem_numbers_and_virtual_filter(self):
         result = run("--json", check=True)
         data = json.loads(result.stdout)

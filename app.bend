@@ -24,6 +24,7 @@ type Key is Data:
   Refresh{}
   ToggleAll{}
   ToggleHelp{}
+  Copy{}
 
 type Action is Data:
   Stay{}
@@ -32,6 +33,7 @@ type Action is Data:
   HomeDir{}
   Rescan{}
   Restat{}
+  CopyPath{}
 
 type State is Data:
   State{tab: Tab, selected: U32, all: Bool, help: Bool}
@@ -68,6 +70,7 @@ def step(key: Key, state: State) -> Decision:
   match key state:
     case Quit{} _: Stop{}
     case Tick{} s: Continue{s, Stay{}}
+    case Copy{} s: Continue{s, CopyPath{}}
     case Cycle{} State{tab, _, a, _}: Continue{State{next_tab(tab), 0, a, False{}}, Stay{}}
     case ShowOverview{} State{_, _, a, _}: Continue{State{Overview{}, 0, a, False{}}, Stay{}}
     case ShowDisks{} State{_, _, a, _}: Continue{State{Disks{}, 0, a, False{}}, Stay{}}
@@ -147,6 +150,7 @@ def content(help: Bool, rows: List<&2, Row>, selected: U32, width: U32) -> Strin
       at(12, 3, "Backspace / h       Parent; H opens your home") ++
       at(13, 3, "r                   Refresh; a toggles virtual mounts") ++
       at(14, 3, "?                   Help; q / Esc quits") ++
+      at(15, 3, "c                   Copy selected full path") ++
       at(16, 3, "Scans are parallel. Cached folders open immediately.")
 
 def render_large(small: Bool, state: State, frame: Frame) -> String:
@@ -161,7 +165,7 @@ def render_large(small: Bool, state: State, frame: Frame) -> String:
       at(7, 3, summary) ++
       content(help, rows, selected, width) ++
       at(earlier(height, 3), 3, "\u{1b}[2m" ++ U32.show(total) ++ " entries  |  " ++ status ++ "\u{1b}[0m") ++
-      at(earlier(height, 1), 3, "\u{1b}[36mq Quit   Tab View   Enter Open   r Refresh   ? Help\u{1b}[0m")
+      at(earlier(height, 1), 3, "\u{1b}[36mq Quit  Tab View  Enter Open  c Copy path  r Refresh  ? Help\u{1b}[0m")
 
 def render(+state: State, frame: Frame) -> String:
   Frame{+w, +h, n, title, summary, status, rows} = frame
