@@ -7,6 +7,10 @@ law ticks_never_scan:
   for +s: App.State
   {App.step(App.Tick{}, s) == App.Continue{s, App.Stay{}} : App.Decision}
 
+law copying_preserves_selection_and_view:
+  for +s: App.State
+  {App.step(App.Copy{}, s) == App.Continue{s, App.CopyPath{}} : App.Decision}
+
 law quit_always_stops:
   for s: App.State
   {App.step(App.Quit{}, s) == App.Stop{} : App.Decision}

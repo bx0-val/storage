@@ -35,6 +35,7 @@ static unsigned storage_jobs=4;
 static double storage_interval=5;
 static int storage_exit;
 static char storage_note[256];
+static double storage_note_until;
 static char *last_screen;
 static size_t last_screen_size;
 
@@ -80,6 +81,34 @@ static char *entry_path(Entry *entry) {
   if(entry->directory)return sx_join(storage_scan->path,entry->rel);
   char *parent=sx_join(storage_scan->path,entry->parent->rel),*result=sx_join(parent,entry->name);
   free(parent);return result;
+}
+/* OSC 52 writes the terminal's clipboard without a helper process. Encode raw
+   path bytes, never the truncated/sanitized display label or a symlink target. */
+static void copy_selected_path(unsigned tab,size_t selected,bool all) {
+  char *path=NULL;
+  if(tab==0) {Filesystem *fs=fs_at(selected,all);if(fs)path=sx_copy(fs->mount);}
+  else if(tab==1&&selected<storage_snapshot.device_count)
+    path=sx_join("/dev",storage_snapshot.devices[selected].name);
+  else if(tab==2&&selected<folder_count)path=entry_path(folder_rows[selected].entry);
+  storage_note_until=sx_now()+3;
+  if(!path) {snprintf(storage_note,sizeof(storage_note),"No selected path to copy");return;}
+  static const char alphabet[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  size_t n=strlen(path),encoded_size=4*((n+2)/3);
+  char *sequence=sx_malloc(encoded_size+9),*out=sequence;
+  memcpy(out,"\033]52;c;",7);out+=7;
+  for(size_t i=0;i<n;i+=3) {
+    unsigned a=(unsigned char)path[i];
+    unsigned b=i+1<n?(unsigned char)path[i+1]:0;
+    unsigned c=i+2<n?(unsigned char)path[i+2]:0;
+    *out++=alphabet[a>>2];*out++=alphabet[((a&3)<<4)|(b>>4)];
+    *out++=i+1<n?alphabet[((b&15)<<2)|(c>>6)]:'=';
+    *out++=i+2<n?alphabet[c&63]:'=';
+  }
+  *out++='\a';
+  write_all(STDOUT_FILENO,sequence,(size_t)(out-sequence));
+  free(sequence);free(path);
+  /* OSC 52 has no acknowledgement; do not claim the terminal accepted it. */
+  snprintf(storage_note,sizeof(storage_note),"Path sent to terminal clipboard");
 }
 static void set_directory(Entry *entry) {
   storage_directory=entry;free(storage_path);storage_path=entry_path(entry);
@@ -237,7 +266,7 @@ Term native_init_run(Env e,Term *f,IoWork *w) {
   for(int i=0;i<io_argc;i++) {
     const char *a=io_argv[i];
     if(!strcmp(a,"--help")||!strcmp(a,"-h")) {
-      puts("Usage: storage [--plain|--json] [--all] [--jobs N] [--interval SECONDS] [DIRECTORY]\n\nFast Linux storage dashboard, compiled from Bend.\n  --plain, --once  Print one snapshot (automatic when piped)\n  --json          Machine-readable snapshot; DIRECTORY adds a full scan\n  --all, -a       Include RAM and other virtual filesystems\n  --jobs N        Parallel scan workers, 1..32 (default: 4)\n  --interval SEC  Filesystem refresh interval, at least 1 (default: 5)\n\nKeys: Tab or 1/2/3 views; arrows or j/k select; Enter browse; h parent;\nH home; r refresh; a virtual mounts; ? help; q quit.\nFolder results appear during scanning. Browsing reuses the scanned tree.");
+      puts("Usage: storage [--plain|--json] [--all] [--jobs N] [--interval SECONDS] [DIRECTORY]\n\nFast Linux storage dashboard, compiled from Bend.\n  --plain, --once  Print one snapshot (automatic when piped)\n  --json          Machine-readable snapshot; DIRECTORY adds a full scan\n  --all, -a       Include RAM and other virtual filesystems\n  --jobs N        Parallel scan workers, 1..32 (default: 4)\n  --interval SEC  Filesystem refresh interval, at least 1 (default: 5)\n\nKeys: Tab or 1/2/3 views; arrows or j/k select; Enter browse; h parent;\nH home; c copy selected full path; r refresh; a virtual mounts; ? help; q quit.\nFolder results appear during scanning. Browsing reuses the scanned tree.");
       return term_pak(CID_APP_STOP,0);
     } else if(!strcmp(a,"--version")) {puts("storage 2.0 (Bend 2.0.27; native Linux effects)");return term_pak(CID_APP_STOP,0);}
     else if(!strcmp(a,"--all")||!strcmp(a,"-a"))all=true;
@@ -289,7 +318,8 @@ Term native_action_run(Env e,Term *f,IoWork *w) {
   (void)w;Term fields[4];native_unpack(e,f[1],4,fields);
   unsigned tab=(unsigned)fields[0],action=term_aux(f[0]);size_t selected=(size_t)fields[1];
   bool all=fields[2]!=0;
-  storage_note[0]=0;
+  if(action!=CID_APP_STAY||sx_now()>=storage_note_until)storage_note[0]=0;
+  if(action==CID_APP_COPYPATH)copy_selected_path(tab,selected,all);
   if(action==CID_APP_RESTAT)snapshot_collect(&storage_snapshot);
   if(action==CID_APP_HOMEDIR) {
     const char *home=getenv("HOME");if(open_directory(home?home:".",false)){fields[0]=2;fields[1]=0;}
@@ -429,6 +459,7 @@ Term native_key_run(Env e,Term *f,IoWork *w) {
     case 8:case 127:case 'h':key=CID_APP_BACK;break;
     case 'H':key=CID_APP_HOME;break;case 'r':key=CID_APP_REFRESH;break;
     case 'a':key=CID_APP_TOGGLEALL;break;case '?':key=CID_APP_TOGGLEHELP;break;
+    case 'c':key=CID_APP_COPY;break;
   }
   return term_pak(key,0);
 }
